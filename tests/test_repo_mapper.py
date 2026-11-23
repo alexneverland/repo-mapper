@@ -293,35 +293,55 @@ def qualified(): pass
         self.assertIn("def active() L1", output)
 
     @unittest.skipUnless(os.name == "nt", "Windows shared-write handling")
+    def test_shared_read_collects_short_chunks(self):
+        path = self.root / "live.py"
+        payload = b"def first(): pass\ndef second(): pass\n"
+        path.write_bytes(payload)
+        fdopen = os.fdopen
+
+        @contextmanager
+        def short_reads(*args, **kwargs):
+            with fdopen(*args, **kwargs) as source:
+                yield SimpleNamespace(
+                    read=lambda limit: source.read(min(limit, 4)),
+                    seek=source.seek,
+                )
+
+        with path.open("ab"), open_directory(self.root) as directory:
+            with patch("scan_paths.os.fdopen", short_reads):
+                self.assertEqual(read_source(directory, path.name, len(payload) + 1), payload)
+                self.assertEqual(read_source(directory, path.name, 9), payload[:9])
+
+    @unittest.skipUnless(os.name == "nt", "Windows shared-write handling")
     def test_reports_source_that_changes_during_a_shared_read(self):
         self.write("live.py", "def active(): pass\n")
         fdopen = os.fdopen
         with (self.root / "live.py").open("ab") as writer:
-            initial_position = writer.tell()
 
             @contextmanager
             def edit_between_reads(*args, **kwargs):
                 with fdopen(*args, **kwargs) as source:
-                    def read(limit):
-                        data = source.read(limit)
-                        if writer.tell() == initial_position:
-                            writer.write(b"# edit in progress\n")
-                            writer.flush()
-                        return data
+                    def rewind(offset):
+                        writer.write(b"# edit in progress\n")
+                        writer.flush()
+                        return source.seek(offset)
 
-                    yield SimpleNamespace(read=read, seek=source.seek)
+                    yield SimpleNamespace(read=source.read, seek=rewind)
 
             with open_directory(self.root) as directory, patch("scan_paths.os.fdopen", edit_between_reads):
                 lines = list(python_lines(directory, "live.py"))
         self.assertEqual(lines, ["AST skipped (file changed during scan)"])
 
     def test_omits_expansion_for_folders_beyond_preview_limit(self):
-        for index in range(25):
-            self.write(f"z_{index:02}/inside.py", "def hidden(): pass\n")
+        for index in range(21):
+            (self.root / f"z_{index:02}").mkdir()
+        self.write("z_00/inside.py", "def visible(): pass\n")
+        self.write("z_20/hidden.py")
         output = self.map("--depth", "2")
         self.assertIn("... more folders.", output)
-        self.assertIn("z_00/\n   |- inside.py\n      def hidden()", output)
-        self.assertNotIn("z_24/", output)
+        self.assertNotIn("output limit reached", output)
+        self.assertIn("z_00/\n   |- inside.py\n      def visible()", output)
+        self.assertNotIn("hidden.py", output)
 
 
 if __name__ == "__main__":

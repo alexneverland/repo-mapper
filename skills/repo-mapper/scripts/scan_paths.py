@@ -89,6 +89,16 @@ def open_directory(path, parent=None):
             os.close(fd)
 
 
+def _read_up_to(source, limit):
+    data = bytearray()
+    while len(data) < limit:
+        chunk = source.read(limit - len(data))
+        if not chunk:
+            break
+        data.extend(chunk)
+    return bytes(data)
+
+
 def read_source(directory, name, limit):
     shared_write = False
     if os.name == "nt":
@@ -115,11 +125,11 @@ def read_source(directory, name, limit):
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise OSError("Entry is no longer a regular file")
         with os.fdopen(fd, "rb", buffering=0 if shared_write else -1, closefd=False) as source:
-            data = source.read(limit)
+            data = _read_up_to(source, limit)
             if shared_write:
                 # Re-read the bytes from the file, since an existing writer may still be active.
                 source.seek(0)
-                if data != source.read(limit):
+                if data != _read_up_to(source, limit):
                     raise SourceChangedError("Source changed during the scan")
             return data
     finally:
