@@ -3,10 +3,17 @@
 **A local repository map for Codex and Claude Code.** Ask your agent how an
 unfamiliar repo is organized and which files to open first.
 
-- See a compact file tree and Python classes, functions, API routes, and
-  declared tools, with source line numbers.
-- Run the bundled CLI with Python 3.10 or newer and the standard library.
-- Inspect Python code with AST parsing. The CLI runs offline and needs no API key.
+![Terminal output from the bundled demo, showing the file tree, Python definitions, HTTP routes, and a declared tool.](docs/demo-output.png)
+
+## Why Repo Mapper?
+
+Codex can explore a repository on its own. Repo Mapper gives it a consistent
+starting point in one local command. The map puts likely entry points and
+source folders first and includes line numbers for Python definitions, routes,
+and tools. Codex can use those leads to decide which files to read next.
+
+The scan runs offline with Python 3.10+ and the standard library. It parses
+Python source without executing it and keeps the map within 80 lines.
 
 ## Quick start
 
