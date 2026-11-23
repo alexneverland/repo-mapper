@@ -32,6 +32,8 @@ if os.name == "nt":
     _INVALID_HANDLE = wintypes.HANDLE(-1).value
     _GENERIC_READ = 0x80000000
     _FILE_SHARE_READ = 1
+    _FILE_SHARE_WRITE = 2
+    _FILE_SHARE_DELETE = 4
     _OPEN_EXISTING = 3
     _FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
     _FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
@@ -44,9 +46,12 @@ if os.name == "nt":
         flags = _FILE_FLAG_OPEN_REPARSE_POINT
         if directory:
             flags |= _FILE_FLAG_BACKUP_SEMANTICS
-        # While a directory handle is held, deny writes and renames to that directory.
+            # While a directory handle is held, deny writes and renames to that directory.
+            share_mode = _FILE_SHARE_READ
+        else:
+            share_mode = _FILE_SHARE_READ | _FILE_SHARE_WRITE | _FILE_SHARE_DELETE
         handle = _create_file(
-            os.fspath(path), _GENERIC_READ, _FILE_SHARE_READ, None, _OPEN_EXISTING, flags, None,
+            os.fspath(path), _GENERIC_READ, share_mode, None, _OPEN_EXISTING, flags, None,
         )
         if handle == _INVALID_HANDLE:
             raise ctypes.WinError(ctypes.get_last_error())

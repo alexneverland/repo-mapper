@@ -94,10 +94,13 @@ secret filter uses filenames. The CLI notes when directory entries become
 unavailable during a scan. Python files over 256 KiB appear in the tree with an
 AST skip message.
 
-The AST scan covers top-level functions and classes and their direct methods.
-Route and tool labels are based on conventional decorator spellings such as
-`@router.get(...)`, `@app.route(...)`, `@tool`, `@function_tool`, and
-`@mcp.tool()`. Route paths appear when expressed as string literals.
+The AST scan covers top-level functions and classes, direct methods, and
+`if __name__ == "__main__"` guards. It recognizes conventional HTTP and
+WebSocket decorators such as `@router.get(...)`, `@app.route(...)`, and
+`@app.websocket(...)`. It also recognizes namespaced and versioned route
+receivers such as `project.api.v1`. Route paths appear when expressed as
+string literals. Other labels include tools (`@tool`, `@function_tool`,
+`@mcp.tool()`) and CLI commands (`@cli.command()`, `@click.command()`).
 
 ## Tests
 

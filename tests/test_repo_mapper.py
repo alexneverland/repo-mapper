@@ -233,6 +233,52 @@ def unrelated(): pass
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(result.stdout, expected)
 
+    def test_chained_decorators_cli_commands_and_main_guard(self):
+        self.write("service.py", """
+@project.api.v1.get("/users")
+def list_users(): pass
+
+@app.websocket("/ws")
+async def stream(): pass
+
+@cli.command()
+def sync(): pass
+
+if __name__ == "__main__":
+    sync()
+""")
+        output = self.map()
+        self.assertIn("def list_users() L3  [GET /users]", output)
+        self.assertIn("async def stream() L6  [WEBSOCKET /ws]", output)
+        self.assertIn("def sync() L9  [command]", output)
+        self.assertIn("if __name__ == '__main__' L11", output)
+
+    def test_route_receiver_does_not_match_unrelated_attributes(self):
+        self.write("callbacks.py", """
+@app.callbacks.get("/ready")
+def on_ready(): pass
+
+@project.router.get("/status")
+def status(): pass
+""")
+        output = self.map()
+        self.assertIn("def on_ready() L3\n", output)
+        self.assertNotIn("[GET /ready]", output)
+        self.assertIn("def status() L6  [GET /status]", output)
+
+    def test_reads_python_file_open_for_writing(self):
+        self.write("live.py", "def active(): pass\n")
+        with open(self.root / "live.py", "a", encoding="utf-8"):
+            output = self.map()
+        self.assertIn("def active() L1", output)
+
+    def test_omits_expansion_for_folders_beyond_preview_limit(self):
+        for index in range(25):
+            self.write(f"z_{index:02}/inside.py", "def hidden(): pass\n")
+        output = self.map("--depth", "2")
+        self.assertIn("... more folders.", output)
+        self.assertNotIn("z_24/", output)
+
 
 if __name__ == "__main__":
     unittest.main()
