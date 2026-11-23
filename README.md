@@ -81,9 +81,9 @@ inventory/
 Use `--depth 1` for just the top level. The default is 3 and the accepted range is
 1–8. Output is capped at 80 lines of up to 100 characters, with up to six
 definitions per Python file. Common starting files and folders appear before
-ordinary files. The map previews ordinary files in wide folders before showing
-their subfolders as separate sections. Scan a subfolder directly or use
-`--depth 1` to see more of its immediate files.
+ordinary files. Wide listings are shortened to leave space for subfolders as
+separate sections. Long section paths retain the deepest folder names. Scan a
+subfolder directly or use `--depth 1` to see more of its immediate files.
 
 The scanner skips hidden entries (including
 `.git` and `.env`), common cache and virtual environment directories, Python

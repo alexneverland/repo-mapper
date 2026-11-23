@@ -131,21 +131,48 @@ def unrelated(): pass
     def test_wide_repo_keeps_folders_entry_points_and_routes_visible(self):
         for index in range(90):
             self.write(f"00_state_{index:02}.json")
-        for name in ("application.db", "cache.sqlite", "store.sqlite3-wal", "work.db-journal",
-                     "state.sqlite3-shm"):
-            self.write(name)
         helpers = "\n".join(f"def helper_{index}(): pass" for index in range(10))
-        self.write("main.py", helpers + "\ndef main(): pass\n")
+        self.write("main.py", helpers + "\ndef main(): pass\nclass Application: pass\n")
         self.write("api/server.py", '@app.get("/status")\ndef status(): pass\n')
         self.write("core/engine.py", "class Engine: pass\n")
         self.write("tests/test_engine.py")
         output = self.map("--depth", "3")
         for expected in ("|- api/", "|- core/", "|- tests/", "def main() L11", "[GET /status]",
-                         "class Engine L1", "more files or definitions"):
+                         "class Application L12", "class Engine L1", "more files or definitions"):
             self.assertIn(expected, output)
-        for suffix in (".db", ".sqlite", "-wal", "-journal", "-shm"):
-            self.assertNotIn(suffix, output)
         self.assertLess(output.index("|- core/"), output.index("|- 00_state_00.json"))
+
+    def test_skips_database_files_but_keeps_database_named_folders(self):
+        databases = (
+            "application.db", "cache.sqlite", "store.sqlite3-wal", "work.db-journal",
+            "state.sqlite3-shm",
+        )
+        for name in databases:
+            self.write(name)
+        self.write("fixtures.db/schema.py")
+        output = self.map()
+        self.assertIn("|- fixtures.db/", output)
+        self.assertIn("|- schema.py", output)
+        for name in databases:
+            self.assertNotIn(name, output)
+
+    def test_many_folders_leave_room_for_a_source_folder_expansion(self):
+        for index in range(85):
+            (self.root / f"folder_{index:02}").mkdir()
+        self.write("api/server.py", '@app.get("/status")\ndef status(): pass\n')
+        output = self.map("--depth", "2")
+        self.assertIn("... more folders.", output)
+        self.assertIn("|- api/", output)
+        self.assertIn("[GET /status]", output)
+
+    def test_long_folder_heading_keeps_the_deepest_name(self):
+        parent = "long_parent_" + "x" * 68
+        leaf = "important_subfolder_" + "y" * 30
+        self.write(f"{parent}/{leaf}/engine.py")
+        lines = self.map("--depth", "3").splitlines()
+        heading = next(line for line in lines if line.startswith("...") and line.endswith(f"/{leaf}/"))
+        self.assertLessEqual(len(heading), 100)
+        self.assertEqual(lines[lines.index(heading) + 1], "   |- engine.py")
 
     def test_read_rejects_a_file_replaced_by_a_link(self):
         outside = self.root.parent / "outside.py"

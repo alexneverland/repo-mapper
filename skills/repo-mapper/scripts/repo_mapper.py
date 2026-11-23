@@ -20,6 +20,8 @@ MAX_LINES = 80
 MAX_LINE_LENGTH = 100
 MAX_SYMBOLS = 6
 MAX_SOURCE_BYTES = 256 * 1024
+MAX_START_LINES = 16
+MAX_FOLDER_PREVIEW = 20
 MAX_ORDINARY_LINES = 12
 INCOMPLETE, FILE, DIRECTORY = range(3)
 
@@ -62,8 +64,6 @@ def entries(directory):
             name = child.name.casefold()
             if name.startswith(".") or SECRET_NAME.search(name) or Path(name).suffix in SKIP_SUFFIXES:
                 continue
-            if name.endswith(DATABASE_SUFFIXES):
-                continue
             if name.split(".", 1)[0].rstrip("~") in SSH_KEY_NAMES:
                 continue
             if name.endswith(("_cache", ".egg-info")):
@@ -76,7 +76,7 @@ def entries(directory):
                     with open_directory(child.name, directory) as child_directory:
                         if not has_venv_marker(child_directory):
                             yield DIRECTORY, child.name
-                elif stat.S_ISREG(metadata.st_mode):
+                elif stat.S_ISREG(metadata.st_mode) and not name.endswith(DATABASE_SUFFIXES):
                     yield FILE, child.name
             except OSError:
                 incomplete = True
@@ -119,8 +119,8 @@ def function_label(node, owner=""):
     kind = "async def" if isinstance(node, ast.AsyncFunctionDef) else "def"
     tags = [label for decorator in node.decorator_list if (label := decorator_label(decorator))]
     details = "  [" + "; ".join(tags) + "]" if tags else ""
-    entry_point = not owner and node.name in {"main", "create_app"}
-    return (not tags, not entry_point), f"{kind} {owner}{node.name}() L{node.lineno}{details}"
+    priority = 1 if not owner and node.name in {"main", "create_app"} else 3
+    return (0 if tags else priority), f"{kind} {owner}{node.name}() L{node.lineno}{details}"
 
 
 def python_lines(directory, name):
@@ -141,7 +141,7 @@ def python_lines(directory, name):
     symbols = []
     for node in module.body:
         if isinstance(node, ast.ClassDef):
-            symbols.append(((True, True), f"class {node.name} L{node.lineno}"))
+            symbols.append((2, f"class {node.name} L{node.lineno}"))
             symbols.extend(
                 function_label(method, f"{node.name}.")
                 for method in node.body if isinstance(method, FUNCTION_TYPES)
@@ -180,6 +180,13 @@ def file_lines(directory, name, indent):
             yield f"{indent}   {line}"
 
 
+def preview_lines(lines, limit, notice):
+    visible = list(itertools.islice(lines, limit + 1))
+    yield from visible[:limit]
+    if len(visible) > limit:
+        yield notice
+
+
 def tree_lines(directory, depth, prefix=""):
     indent = "   " if prefix else ""
     try:
@@ -191,27 +198,31 @@ def tree_lines(directory, depth, prefix=""):
 
     folders = [name for kind, name in children if kind == DIRECTORY]
     if prefix and children:
-        yield prefix
+        yield compact_line(prefix, keep_end=True)
 
+    starting_files = []
     ordinary_files = []
     for kind, name in children:
         if kind == INCOMPLETE:
             yield f"{indent}[scan incomplete: some entries unavailable]"
-        elif kind == DIRECTORY:
-            yield f"{indent}|- {name}/"
-        elif entry_order((kind, name))[0] < 3:
-            yield from file_lines(directory, name, indent)
-        else:
-            ordinary_files.append(name)
+        elif kind == FILE:
+            files = starting_files if entry_order((kind, name))[0] < 3 else ordinary_files
+            files.append(name)
 
+    starting_lines = (
+        line for name in starting_files for line in file_lines(directory, name, indent)
+    )
+    folder_lines = (f"{indent}|- {name}/" for name in folders)
     ordinary_lines = (
         line for name in ordinary_files for line in file_lines(directory, name, indent)
     )
     if depth > 1 and folders:
-        preview = list(itertools.islice(ordinary_lines, MAX_ORDINARY_LINES + 1))
-        yield from preview[:MAX_ORDINARY_LINES]
-        if len(preview) > MAX_ORDINARY_LINES:
-            yield f"{indent}... more files or definitions. Use --depth 1 for this folder."
+        yield from preview_lines(starting_lines, MAX_START_LINES, f"{indent}... more starting files or definitions.")
+        yield from preview_lines(folder_lines, MAX_FOLDER_PREVIEW, f"{indent}... more folders. Use --depth 1.")
+        yield from preview_lines(
+            ordinary_lines, MAX_ORDINARY_LINES,
+            f"{indent}... more files or definitions. Use --depth 1 for this folder.",
+        )
         for name in folders:
             child_prefix = f"{prefix}{name}/"
             try:
@@ -219,14 +230,18 @@ def tree_lines(directory, depth, prefix=""):
                     if not has_venv_marker(child_directory):
                         yield from tree_lines(child_directory, depth - 1, child_prefix)
             except OSError:
-                yield f"{child_prefix} [directory unavailable]"
+                yield compact_line(f"{child_prefix} [directory unavailable]", keep_end=True)
     else:
+        yield from starting_lines
+        yield from folder_lines
         yield from ordinary_lines
 
 
-def compact_line(line):
+def compact_line(line, *, keep_end=False):
     escaped = "".join(char if char.isprintable() else ascii(char)[1:-1] for char in line)
     if len(escaped) > MAX_LINE_LENGTH:
+        if keep_end:
+            return "..." + escaped[-(MAX_LINE_LENGTH - 3):]
         return escaped[:MAX_LINE_LENGTH - 3] + "..."
     return escaped
 
