@@ -1,10 +1,13 @@
+from contextlib import contextmanager
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 
 PROJECT = Path(__file__).resolve().parents[1]
@@ -12,6 +15,7 @@ SKILL = PROJECT / "skills" / "repo-mapper"
 CLI = SKILL / "scripts" / "repo_mapper.py"
 DEMO = PROJECT / "examples" / "demo_repo"
 sys.path.insert(0, str(CLI.parent))
+from repo_mapper import python_lines
 from scan_paths import open_directory, read_source
 
 
@@ -232,6 +236,112 @@ def unrelated(): pass
                 result = run_cli(DEMO, "--depth", "2", cli=installed / "scripts" / CLI.name)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(result.stdout, expected)
+
+    def test_chained_decorators_cli_commands_and_main_guard(self):
+        self.write("service.py", """
+@project.api.v1.get("/users")
+def list_users(): pass
+
+@app.websocket("/ws")
+async def stream(): pass
+
+@cli.command()
+def sync(): pass
+
+if __name__ == "__main__":
+    sync()
+""")
+        output = self.map()
+        self.assertIn("def list_users() L3  [GET /users]", output)
+        self.assertIn("async def stream() L6  [WEBSOCKET /ws]", output)
+        self.assertIn("def sync() L9  [command]", output)
+        self.assertIn("if __name__ == '__main__' L11", output)
+
+    def test_route_receiver_does_not_match_unrelated_attributes(self):
+        self.write("callbacks.py", """
+@app.callbacks.get("/ready")
+def on_ready(): pass
+
+@project.router.get("/status")
+def status(): pass
+""")
+        output = self.map()
+        self.assertIn("def on_ready() L3\n", output)
+        self.assertNotIn("[GET /ready]", output)
+        self.assertIn("def status() L6  [GET /status]", output)
+
+    def test_websocket_route_and_qualified_cli_decorators(self):
+        self.write("service.py", """
+@app.websocket_route("/socket")
+async def legacy_socket(): pass
+
+@command
+def unrelated(): pass
+
+@click.command()
+def qualified(): pass
+""")
+        output = self.map()
+        self.assertIn("async def legacy_socket() L3  [WEBSOCKET /socket]", output)
+        self.assertIn("def unrelated() L6\n", output)
+        self.assertIn("def qualified() L9  [command]", output)
+
+    def test_reads_python_file_open_for_writing(self):
+        self.write("live.py", "def active(): pass\n")
+        with open(self.root / "live.py", "a", encoding="utf-8"):
+            output = self.map()
+        self.assertIn("def active() L1", output)
+
+    @unittest.skipUnless(os.name == "nt", "Windows shared-write handling")
+    def test_shared_read_collects_short_chunks(self):
+        path = self.root / "live.py"
+        payload = b"def first(): pass\ndef second(): pass\n"
+        path.write_bytes(payload)
+        fdopen = os.fdopen
+
+        @contextmanager
+        def short_reads(*args, **kwargs):
+            with fdopen(*args, **kwargs) as source:
+                yield SimpleNamespace(
+                    read=lambda limit: source.read(min(limit, 4)),
+                    seek=source.seek,
+                )
+
+        with path.open("ab"), open_directory(self.root) as directory:
+            with patch("scan_paths.os.fdopen", short_reads):
+                self.assertEqual(read_source(directory, path.name, len(payload) + 1), payload)
+                self.assertEqual(read_source(directory, path.name, 9), payload[:9])
+
+    @unittest.skipUnless(os.name == "nt", "Windows shared-write handling")
+    def test_reports_source_that_changes_during_a_shared_read(self):
+        self.write("live.py", "def active(): pass\n")
+        fdopen = os.fdopen
+        with (self.root / "live.py").open("ab") as writer:
+
+            @contextmanager
+            def edit_between_reads(*args, **kwargs):
+                with fdopen(*args, **kwargs) as source:
+                    def rewind(offset):
+                        writer.write(b"# edit in progress\n")
+                        writer.flush()
+                        return source.seek(offset)
+
+                    yield SimpleNamespace(read=source.read, seek=rewind)
+
+            with open_directory(self.root) as directory, patch("scan_paths.os.fdopen", edit_between_reads):
+                lines = list(python_lines(directory, "live.py"))
+        self.assertEqual(lines, ["AST skipped (file changed during scan)"])
+
+    def test_omits_expansion_for_folders_beyond_preview_limit(self):
+        for index in range(21):
+            (self.root / f"z_{index:02}").mkdir()
+        self.write("z_00/inside.py", "def visible(): pass\n")
+        self.write("z_20/hidden.py")
+        output = self.map("--depth", "2")
+        self.assertIn("... more folders.", output)
+        self.assertNotIn("output limit reached", output)
+        self.assertIn("z_00/\n   |- inside.py\n      def visible()", output)
+        self.assertNotIn("hidden.py", output)
 
 
 if __name__ == "__main__":

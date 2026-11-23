@@ -11,7 +11,9 @@ import re
 import stat
 import sys
 
-from scan_paths import has_venv_marker, is_reparse_point, open_directory, read_source
+from scan_paths import (
+    SourceChangedError, has_venv_marker, is_reparse_point, open_directory, read_source,
+)
 
 
 DEFAULT_DEPTH = 3
@@ -52,7 +54,9 @@ SOURCE_DIRS = {
     "skills", "src", "test", "tests", "tools",
 }
 ROUTE_METHODS = {"get", "post", "put", "patch", "delete", "options", "head", "trace"}
+ROUTE_RECEIVERS = {"app", "router", "server", "bp", "blueprint", "api"}
 TOOL_RECEIVERS = {"mcp", "server", "langchain", "tools"}
+CLI_RECEIVERS = {"app", "cli", "main", "typer", "click"}
 FUNCTION_TYPES = (ast.FunctionDef, ast.AsyncFunctionDef)
 
 
@@ -84,21 +88,49 @@ def entries(directory):
         yield INCOMPLETE, ""
 
 
+def _receiver_parts(node):
+    """Return the two rightmost names of a receiver made of names and attributes."""
+    names = []
+    current = node
+    while isinstance(current, ast.Attribute):
+        names.append(current.attr)
+        current = current.value
+    if not isinstance(current, ast.Name):
+        return ()
+    names.append(current.id)
+    return tuple(names[:2])
+
+
 def decorator_label(decorator):
     target = decorator.func if isinstance(decorator, ast.Call) else decorator
     if isinstance(target, ast.Name):
         return "tool" if target.id in {"tool", "function_tool"} else None
-    if not isinstance(target, ast.Attribute) or not isinstance(target.value, ast.Name):
+    if not isinstance(target, ast.Attribute):
         return None
 
-    receiver, attribute = target.value.id, target.attr
+    receiver_parts = _receiver_parts(target.value)
+    if not receiver_parts:
+        return None
+    receiver, *parents = receiver_parts
+    attribute = target.attr
     if attribute == "tool" and receiver in TOOL_RECEIVERS:
         return "tool"
-    if receiver not in {"app", "router", "server", "bp", "blueprint"}:
+    if attribute == "command" and receiver in CLI_RECEIVERS:
+        return "command"
+    # A route receiver may end with a version under a conventional name,
+    # such as api.v1. Other attributes of an app or router are not route receivers.
+    if parents and re.fullmatch(r"v[0-9]+(?:_[0-9]+)*", receiver):
+        receiver = parents[0]
+    if receiver not in ROUTE_RECEIVERS:
         return None
-    if attribute not in ROUTE_METHODS | {"route", "api_route"}:
+    if attribute not in ROUTE_METHODS | {"route", "api_route", "websocket", "websocket_route"}:
         return None
-    method = attribute.upper() if attribute in ROUTE_METHODS else "ROUTE"
+    if attribute in {"websocket", "websocket_route"}:
+        method = "WEBSOCKET"
+    elif attribute in ROUTE_METHODS:
+        method = attribute.upper()
+    else:
+        method = "ROUTE"
     if isinstance(decorator, ast.Call):
         keywords = {item.arg: item.value for item in decorator.keywords}
         methods = keywords.get("methods")
@@ -123,6 +155,19 @@ def function_label(node, owner=""):
     return (0 if tags else priority), f"{kind} {owner}{node.name}() L{node.lineno}{details}"
 
 
+def _is_main_guard(node):
+    if not isinstance(node, ast.If) or not isinstance(node.test, ast.Compare):
+        return False
+    test = node.test
+    if len(test.ops) != 1 or not isinstance(test.ops[0], ast.Eq) or len(test.comparators) != 1:
+        return False
+    sides = (test.left, test.comparators[0])
+    return (
+        any(isinstance(side, ast.Name) and side.id == "__name__" for side in sides)
+        and any(isinstance(side, ast.Constant) and side.value == "__main__" for side in sides)
+    )
+
+
 def python_lines(directory, name):
     try:
         data = read_source(directory, name, MAX_SOURCE_BYTES + 1)
@@ -133,6 +178,9 @@ def python_lines(directory, name):
     except SyntaxError as error:
         location = f" L{error.lineno}" if error.lineno else ""
         yield f"SyntaxError{location}"
+        return
+    except SourceChangedError:
+        yield "AST skipped (file changed during scan)"
         return
     except (OSError, ValueError, RecursionError):
         yield "AST unavailable"
@@ -148,6 +196,8 @@ def python_lines(directory, name):
             )
         elif isinstance(node, FUNCTION_TYPES):
             symbols.append(function_label(node))
+        elif _is_main_guard(node):
+            symbols.append((1, f"if __name__ == '__main__' L{node.lineno}"))
 
     # Keep routes, tools, and conventional entry points visible ahead of helpers.
     symbols.sort(key=lambda symbol: symbol[0])
@@ -223,7 +273,7 @@ def tree_lines(directory, depth, prefix=""):
             ordinary_lines, MAX_ORDINARY_LINES,
             f"{indent}... more files or definitions. Use --depth 1 for this folder.",
         )
-        for name in folders:
+        for name in folders[:MAX_FOLDER_PREVIEW]:
             child_prefix = f"{prefix}{name}/"
             try:
                 with open_directory(name, directory) as child_directory:
