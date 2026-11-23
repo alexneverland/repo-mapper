@@ -1,10 +1,13 @@
+from contextlib import contextmanager
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 
 PROJECT = Path(__file__).resolve().parents[1]
@@ -12,6 +15,7 @@ SKILL = PROJECT / "skills" / "repo-mapper"
 CLI = SKILL / "scripts" / "repo_mapper.py"
 DEMO = PROJECT / "examples" / "demo_repo"
 sys.path.insert(0, str(CLI.parent))
+from repo_mapper import python_lines
 from scan_paths import open_directory, read_source
 
 
@@ -266,17 +270,57 @@ def status(): pass
         self.assertNotIn("[GET /ready]", output)
         self.assertIn("def status() L6  [GET /status]", output)
 
+    def test_websocket_route_and_qualified_cli_decorators(self):
+        self.write("service.py", """
+@app.websocket_route("/socket")
+async def legacy_socket(): pass
+
+@command
+def unrelated(): pass
+
+@click.command()
+def qualified(): pass
+""")
+        output = self.map()
+        self.assertIn("async def legacy_socket() L3  [WEBSOCKET /socket]", output)
+        self.assertIn("def unrelated() L6\n", output)
+        self.assertIn("def qualified() L9  [command]", output)
+
     def test_reads_python_file_open_for_writing(self):
         self.write("live.py", "def active(): pass\n")
         with open(self.root / "live.py", "a", encoding="utf-8"):
             output = self.map()
         self.assertIn("def active() L1", output)
 
+    @unittest.skipUnless(os.name == "nt", "Windows shared-write handling")
+    def test_reports_source_that_changes_during_a_shared_read(self):
+        self.write("live.py", "def active(): pass\n")
+        fdopen = os.fdopen
+        with (self.root / "live.py").open("ab") as writer:
+            initial_position = writer.tell()
+
+            @contextmanager
+            def edit_between_reads(*args, **kwargs):
+                with fdopen(*args, **kwargs) as source:
+                    def read(limit):
+                        data = source.read(limit)
+                        if writer.tell() == initial_position:
+                            writer.write(b"# edit in progress\n")
+                            writer.flush()
+                        return data
+
+                    yield SimpleNamespace(read=read, seek=source.seek)
+
+            with open_directory(self.root) as directory, patch("scan_paths.os.fdopen", edit_between_reads):
+                lines = list(python_lines(directory, "live.py"))
+        self.assertEqual(lines, ["AST skipped (file changed during scan)"])
+
     def test_omits_expansion_for_folders_beyond_preview_limit(self):
         for index in range(25):
             self.write(f"z_{index:02}/inside.py", "def hidden(): pass\n")
         output = self.map("--depth", "2")
         self.assertIn("... more folders.", output)
+        self.assertIn("z_00/\n   |- inside.py\n      def hidden()", output)
         self.assertNotIn("z_24/", output)
 
 

@@ -89,18 +89,19 @@ The scanner skips hidden entries (including
 `.git` and `.env`), common cache and virtual environment directories, Python
 virtual environments marked by `pyvenv.cfg`, common secret file names and
 extensions, common database files and their SQLite sidecars, symbolic links,
-and Windows reparse points such as junctions. The
-secret filter uses filenames. The CLI notes when directory entries become
-unavailable during a scan. Python files over 256 KiB appear in the tree with an
-AST skip message.
+and Windows reparse points such as junctions. The secret filter uses filenames.
+The CLI notes when directory entries become unavailable during a scan. Python
+files over 256 KiB appear in the tree with an AST skip message. On Windows, a
+file already open for writing can be scanned if two bounded reads agree.
 
 The AST scan covers top-level functions and classes, direct methods, and
 `if __name__ == "__main__"` guards. It recognizes conventional HTTP and
-WebSocket decorators such as `@router.get(...)`, `@app.route(...)`, and
-`@app.websocket(...)`. It also recognizes namespaced and versioned route
-receivers such as `project.api.v1`. Route paths appear when expressed as
-string literals. Other labels include tools (`@tool`, `@function_tool`,
-`@mcp.tool()`) and CLI commands (`@cli.command()`, `@click.command()`).
+WebSocket decorators such as `@router.get(...)`, `@app.route(...)`,
+`@app.websocket(...)`, and `@app.websocket_route(...)`. It also recognizes
+namespaced and versioned route receivers such as `project.api.v1`. Route paths
+appear when expressed as string literals. Other labels include tools
+(`@tool`, `@function_tool`, `@mcp.tool()`) and qualified CLI commands
+(`@cli.command()`, `@click.command()`).
 
 ## Tests
 

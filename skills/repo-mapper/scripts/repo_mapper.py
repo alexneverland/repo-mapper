@@ -11,7 +11,9 @@ import re
 import stat
 import sys
 
-from scan_paths import has_venv_marker, is_reparse_point, open_directory, read_source
+from scan_paths import (
+    SourceChangedError, has_venv_marker, is_reparse_point, open_directory, read_source,
+)
 
 
 DEFAULT_DEPTH = 3
@@ -102,9 +104,7 @@ def _receiver_parts(node):
 def decorator_label(decorator):
     target = decorator.func if isinstance(decorator, ast.Call) else decorator
     if isinstance(target, ast.Name):
-        if target.id in {"tool", "function_tool"}:
-            return "tool"
-        return "command" if target.id == "command" else None
+        return "tool" if target.id in {"tool", "function_tool"} else None
     if not isinstance(target, ast.Attribute):
         return None
 
@@ -123,9 +123,9 @@ def decorator_label(decorator):
         receiver = parents[0]
     if receiver not in ROUTE_RECEIVERS:
         return None
-    if attribute not in ROUTE_METHODS | {"route", "api_route", "websocket"}:
+    if attribute not in ROUTE_METHODS | {"route", "api_route", "websocket", "websocket_route"}:
         return None
-    if attribute == "websocket":
+    if attribute in {"websocket", "websocket_route"}:
         method = "WEBSOCKET"
     elif attribute in ROUTE_METHODS:
         method = attribute.upper()
@@ -178,6 +178,9 @@ def python_lines(directory, name):
     except SyntaxError as error:
         location = f" L{error.lineno}" if error.lineno else ""
         yield f"SyntaxError{location}"
+        return
+    except SourceChangedError:
+        yield "AST skipped (file changed during scan)"
         return
     except (OSError, ValueError, RecursionError):
         yield "AST unavailable"

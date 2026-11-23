@@ -5,6 +5,10 @@ import os
 import stat
 
 
+class SourceChangedError(OSError):
+    """A file changed while being read."""
+
+
 def is_reparse_point(metadata):
     mask = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
     return bool(getattr(metadata, "st_file_attributes", 0) & mask)
@@ -33,8 +37,8 @@ if os.name == "nt":
     _GENERIC_READ = 0x80000000
     _FILE_SHARE_READ = 1
     _FILE_SHARE_WRITE = 2
-    _FILE_SHARE_DELETE = 4
     _OPEN_EXISTING = 3
+    _ERROR_SHARING_VIOLATION = 32
     _FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
     _FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
     _FILE_ATTRIBUTE_TAG_INFO = 9
@@ -42,14 +46,11 @@ if os.name == "nt":
     class _AttributeTagInfo(ctypes.Structure):
         _fields_ = [("attributes", wintypes.DWORD), ("reparse_tag", wintypes.DWORD)]
 
-    def _open_windows_entry(path, *, directory):
+    def _open_windows_entry(path, *, directory, share_mode=_FILE_SHARE_READ):
         flags = _FILE_FLAG_OPEN_REPARSE_POINT
         if directory:
             flags |= _FILE_FLAG_BACKUP_SEMANTICS
             # While a directory handle is held, deny writes and renames to that directory.
-            share_mode = _FILE_SHARE_READ
-        else:
-            share_mode = _FILE_SHARE_READ | _FILE_SHARE_WRITE | _FILE_SHARE_DELETE
         handle = _create_file(
             os.fspath(path), _GENERIC_READ, share_mode, None, _OPEN_EXISTING, flags, None,
         )
@@ -89,8 +90,18 @@ def open_directory(path, parent=None):
 
 
 def read_source(directory, name, limit):
+    shared_write = False
     if os.name == "nt":
-        handle = _open_windows_entry(directory / name, directory=False)
+        path = directory / name
+        try:
+            handle = _open_windows_entry(path, directory=False)
+        except OSError as error:
+            if getattr(error, "winerror", None) != _ERROR_SHARING_VIOLATION:
+                raise
+            handle = _open_windows_entry(
+                path, directory=False, share_mode=_FILE_SHARE_READ | _FILE_SHARE_WRITE,
+            )
+            shared_write = True
         try:
             fd = msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
         except OSError:
@@ -103,8 +114,14 @@ def read_source(directory, name, limit):
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise OSError("Entry is no longer a regular file")
-        with os.fdopen(fd, "rb", closefd=False) as source:
-            return source.read(limit)
+        with os.fdopen(fd, "rb", buffering=0 if shared_write else -1, closefd=False) as source:
+            data = source.read(limit)
+            if shared_write:
+                # Re-read the bytes from the file, since an existing writer may still be active.
+                source.seek(0)
+                if data != source.read(limit):
+                    raise SourceChangedError("Source changed during the scan")
+            return data
     finally:
         os.close(fd)
 
