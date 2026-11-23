@@ -2,11 +2,16 @@
 
 import argparse
 import ast
+from contextlib import closing
+import heapq
 import itertools
+import os
 from pathlib import Path
 import re
 import stat
 import sys
+
+from scan_paths import has_venv_marker, is_reparse_point, open_directory, read_source
 
 
 DEFAULT_DEPTH = 3
@@ -15,6 +20,7 @@ MAX_LINES = 80
 MAX_LINE_LENGTH = 100
 MAX_SYMBOLS = 6
 MAX_SOURCE_BYTES = 256 * 1024
+INCOMPLETE, FILE, DIRECTORY = range(3)
 
 SKIP_DIRS = {
     "venv", "virtualenv", "env", "__pycache__", "node_modules",
@@ -26,6 +32,7 @@ SECRET_NAME = re.compile(
     r"passwd|api[._-]?keys?|private[._-]?keys?|service[._-]?accounts?)(?:[._-]|$)"
 )
 SECRET_SUFFIXES = {".pem", ".key", ".p12", ".pfx", ".jks", ".keystore", ".kdbx"}
+SSH_KEY_NAMES = {"id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "id_ecdsa_sk", "id_ed25519_sk"}
 SKIP_SUFFIXES = SECRET_SUFFIXES | {".pyc", ".pyo"}
 ROUTE_METHODS = {"get", "post", "put", "patch", "delete", "options", "head", "trace"}
 TOOL_RECEIVERS = {"mcp", "server", "langchain", "tools"}
@@ -34,23 +41,30 @@ FUNCTION_TYPES = (ast.FunctionDef, ast.AsyncFunctionDef)
 
 def entries(directory):
     """Return visible regular files and directories, without following links."""
-    for path in sorted(directory.iterdir(), key=lambda item: (item.name.casefold(), item.name)):
-        name = path.name.casefold()
-        if name.startswith(".") or SECRET_NAME.search(name) or path.suffix.casefold() in SKIP_SUFFIXES:
-            continue
-        if name.startswith("id_") or name.endswith(("_cache", ".egg-info")):
-            continue
-        try:
-            metadata = path.lstat()
-            if getattr(metadata, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+    incomplete = False
+    with os.scandir(directory) as children:
+        for child in children:
+            name = child.name.casefold()
+            if name.startswith(".") or SECRET_NAME.search(name) or Path(name).suffix in SKIP_SUFFIXES:
                 continue
-            if stat.S_ISDIR(metadata.st_mode):
-                if name not in SKIP_DIRS and not (path / "pyvenv.cfg").is_file():
-                    yield path, True
-            elif stat.S_ISREG(metadata.st_mode):
-                yield path, False
-        except OSError:
-            continue
+            if name.split(".", 1)[0].rstrip("~") in SSH_KEY_NAMES:
+                continue
+            if name.endswith(("_cache", ".egg-info")):
+                continue
+            try:
+                metadata = child.stat(follow_symlinks=False)
+                if is_reparse_point(metadata):
+                    continue
+                if stat.S_ISDIR(metadata.st_mode) and name not in SKIP_DIRS:
+                    with open_directory(child.name, directory) as child_directory:
+                        if not has_venv_marker(child_directory):
+                            yield DIRECTORY, child.name
+                elif stat.S_ISREG(metadata.st_mode):
+                    yield FILE, child.name
+            except OSError:
+                incomplete = True
+    if incomplete:
+        yield INCOMPLETE, ""
 
 
 def decorator_label(decorator):
@@ -91,14 +105,13 @@ def function_label(node, owner=""):
     return bool(tags), f"{kind} {owner}{node.name}() L{node.lineno}{details}"
 
 
-def python_lines(path):
+def python_lines(directory, name):
     try:
-        with path.open("rb") as source:
-            data = source.read(MAX_SOURCE_BYTES + 1)
+        data = read_source(directory, name, MAX_SOURCE_BYTES + 1)
         if len(data) > MAX_SOURCE_BYTES:
             yield "AST skipped (file exceeds 256 KiB)"
             return
-        module = ast.parse(data, filename=path.name)
+        module = ast.parse(data, filename=name)
     except SyntaxError as error:
         location = f" L{error.lineno}" if error.lineno else ""
         yield f"SyntaxError{location}"
@@ -128,21 +141,30 @@ def python_lines(path):
 
 def tree_lines(directory, depth, indent=""):
     try:
-        children = list(entries(directory))
+        # Only keep as many sorted entries as the output can show.
+        children = heapq.nsmallest(
+            MAX_LINES, entries(directory), key=lambda child: (child[0], child[1].casefold(), child[1]),
+        )
     except OSError:
         yield f"{indent}[directory unreadable]"
         return
-    # Show top-level files ahead of subtrees that could fill the output budget.
-    children.sort(key=lambda child: child[1])
-    for path, is_directory in children:
-        if is_directory:
-            yield f"{indent}|- {path.name}/"
+    for kind, name in children:
+        if kind == INCOMPLETE:
+            yield f"{indent}[scan incomplete: some entries unavailable]"
+        elif kind == DIRECTORY:
+            yield f"{indent}|- {name}/"
             if depth > 1:
-                yield from tree_lines(path, depth - 1, indent + "   ")
+                with_child_indent = indent + "   "
+                try:
+                    with open_directory(name, directory) as child_directory:
+                        if not has_venv_marker(child_directory):
+                            yield from tree_lines(child_directory, depth - 1, with_child_indent)
+                except OSError:
+                    yield f"{with_child_indent}[directory unavailable]"
         else:
-            yield f"{indent}|- {path.name}"
-            if path.suffix.casefold() == ".py":
-                for line in python_lines(path):
+            yield f"{indent}|- {name}"
+            if name.lower().endswith(".py"):
+                for line in python_lines(directory, name):
                     yield f"{indent}   {line}"
 
 
@@ -172,10 +194,16 @@ def main():
 
     sys.stdout.reconfigure(errors="backslashreplace")
     print(compact_line(f"Repo map: {root.name or root.anchor} (depth {args.depth})"))
-    lines = list(itertools.islice(tree_lines(root, args.depth), MAX_LINES - 1))
-    for line in lines[:MAX_LINES - 2]:
+    try:
+        with open_directory(root) as directory, closing(tree_lines(directory, args.depth)) as scan:
+            lines = list(itertools.islice(scan, MAX_LINES))
+    except OSError:
+        parser.error("folder must be an accessible directory")
+    truncated = len(lines) == MAX_LINES
+    visible_lines = lines[:MAX_LINES - 2] if truncated else lines
+    for line in visible_lines:
         print(compact_line(line))
-    if len(lines) > MAX_LINES - 2:
+    if truncated:
         print("... output limit reached. Scan a subfolder for more detail.")
     elif not lines:
         print("(no visible entries)")

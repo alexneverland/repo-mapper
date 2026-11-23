@@ -83,8 +83,9 @@ definitions per Python file. The scanner skips hidden entries (including
 `.git` and `.env`), common cache and virtual environment directories, Python
 virtual environments marked by `pyvenv.cfg`, common secret file names and
 extensions, symbolic links, and Windows reparse points such as junctions. The
-secret filter uses filenames. Python files over 256 KiB appear in the tree with
-an AST skip message.
+secret filter uses filenames. The CLI notes when directory entries become
+unavailable during a scan. Python files over 256 KiB appear in the tree with an
+AST skip message.
 
 The AST scan covers top-level functions and classes and their direct methods.
 Route and tool labels are based on conventional decorator spellings such as

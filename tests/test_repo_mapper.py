@@ -11,6 +11,8 @@ PROJECT = Path(__file__).resolve().parents[1]
 SKILL = PROJECT / "skills" / "repo-mapper"
 CLI = SKILL / "scripts" / "repo_mapper.py"
 DEMO = PROJECT / "examples" / "demo_repo"
+sys.path.insert(0, str(CLI.parent))
+from scan_paths import open_directory, read_source
 
 
 def run_cli(folder, *args, cli=CLI):
@@ -81,13 +83,14 @@ def unrelated(): pass
             "my-service-account.json", "private.pem", "id_ed25519", ".ruff_cache/index",
             ".venv/pkg.py", "venv/pkg.py", "tools-env/pyvenv.cfg", "tools-env/pkg.py",
             "custom-runtime/pyvenv.cfg", "custom-runtime/pkg.py", "__pycache__/app.pyc",
-            "app.pyc",
+            "app.pyc", "id_rsa.bak",
         )
         for relative_path in excluded:
             self.write(relative_path, "def excluded(): pass")
         self.write("visible.py")
+        self.write("id_lookup.py")
         output = self.map()
-        self.assertEqual(output.splitlines()[1:], ["|- visible.py"])
+        self.assertEqual(output.splitlines()[1:], ["|- id_lookup.py", "|- visible.py"])
 
     def test_does_not_follow_outside_links(self):
         outside = self.root.parent / "outside"
@@ -115,6 +118,49 @@ def unrelated(): pass
         self.assertIn("module.py", self.map("--depth", "3"))
         self.assertEqual(run_cli(self.root, "--depth", "0").returncode, 2)
         self.assertEqual(run_cli(self.root / "missing").returncode, 2)
+
+    def test_file_at_output_boundary(self):
+        for index in range(79):
+            self.write(f"item_{index:02}.txt")
+        lines = self.map().splitlines()
+        self.assertEqual(len(lines), 80)
+        self.assertEqual(lines[-1], "|- item_78.txt")
+        self.write("item_79.txt")
+        self.assertIn("output limit reached", self.map().splitlines()[-1])
+
+    def test_read_rejects_a_file_replaced_by_a_link(self):
+        outside = self.root.parent / "outside.py"
+        outside.touch()
+        self.write("entry.py")
+        with open_directory(self.root) as directory:
+            path = self.root / "entry.py"
+            path.unlink()
+            try:
+                path.symlink_to(outside)
+            except OSError as error:
+                if os.name == "nt" and error.winerror in {5, 1314}:
+                    self.skipTest("Windows file symlinks require Developer Mode or equivalent privileges")
+                raise
+            with self.assertRaises(OSError):
+                read_source(directory, path.name, 10)
+
+    def test_open_rejects_a_directory_replaced_by_a_link(self):
+        outside = self.root.parent / "outside"
+        outside.mkdir()
+        path = self.root / "entry"
+        path.mkdir()
+        with open_directory(self.root) as directory:
+            path.rmdir()
+            if os.name == "nt":
+                subprocess.run(
+                    ["cmd.exe", "/d", "/c", "mklink", "/J", str(path), str(outside)],
+                    check=True, capture_output=True, timeout=10,
+                )
+            else:
+                path.symlink_to(outside, target_is_directory=True)
+            with self.assertRaises(OSError):
+                with open_directory(path.name, directory):
+                    self.fail("A directory link was followed")
 
     def test_output_is_bounded(self):
         self.write("00.py", "\n".join(f"def helper_{i}(): pass" for i in range(12)))
