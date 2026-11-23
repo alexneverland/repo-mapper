@@ -20,6 +20,7 @@ MAX_LINES = 80
 MAX_LINE_LENGTH = 100
 MAX_SYMBOLS = 6
 MAX_SOURCE_BYTES = 256 * 1024
+MAX_ORDINARY_LINES = 12
 INCOMPLETE, FILE, DIRECTORY = range(3)
 
 SKIP_DIRS = {
@@ -34,6 +35,20 @@ SECRET_NAME = re.compile(
 SECRET_SUFFIXES = {".pem", ".key", ".p12", ".pfx", ".jks", ".keystore", ".kdbx"}
 SSH_KEY_NAMES = {"id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "id_ecdsa_sk", "id_ed25519_sk"}
 SKIP_SUFFIXES = SECRET_SUFFIXES | {".pyc", ".pyo"}
+DATABASE_SUFFIXES = tuple(
+    extension + companion
+    for extension in (".db", ".sqlite", ".sqlite3")
+    for companion in ("", "-journal", "-shm", "-wal")
+)
+START_FILES = {
+    "agents.md", "pyproject.toml", "setup.py", "setup.cfg",
+    "__main__.py", "main.py", "app.py", "api.py", "server.py", "cli.py",
+    "boot.py", "manage.py", "asgi.py", "wsgi.py",
+}
+SOURCE_DIRS = {
+    "api", "app", "apps", "core", "examples", "lib", "packages", "services",
+    "skills", "src", "test", "tests", "tools",
+}
 ROUTE_METHODS = {"get", "post", "put", "patch", "delete", "options", "head", "trace"}
 TOOL_RECEIVERS = {"mcp", "server", "langchain", "tools"}
 FUNCTION_TYPES = (ast.FunctionDef, ast.AsyncFunctionDef)
@@ -46,6 +61,8 @@ def entries(directory):
         for child in children:
             name = child.name.casefold()
             if name.startswith(".") or SECRET_NAME.search(name) or Path(name).suffix in SKIP_SUFFIXES:
+                continue
+            if name.endswith(DATABASE_SUFFIXES):
                 continue
             if name.split(".", 1)[0].rstrip("~") in SSH_KEY_NAMES:
                 continue
@@ -102,7 +119,8 @@ def function_label(node, owner=""):
     kind = "async def" if isinstance(node, ast.AsyncFunctionDef) else "def"
     tags = [label for decorator in node.decorator_list if (label := decorator_label(decorator))]
     details = "  [" + "; ".join(tags) + "]" if tags else ""
-    return bool(tags), f"{kind} {owner}{node.name}() L{node.lineno}{details}"
+    entry_point = not owner and node.name in {"main", "create_app"}
+    return (not tags, not entry_point), f"{kind} {owner}{node.name}() L{node.lineno}{details}"
 
 
 def python_lines(directory, name):
@@ -123,7 +141,7 @@ def python_lines(directory, name):
     symbols = []
     for node in module.body:
         if isinstance(node, ast.ClassDef):
-            symbols.append((False, f"class {node.name} L{node.lineno}"))
+            symbols.append(((True, True), f"class {node.name} L{node.lineno}"))
             symbols.extend(
                 function_label(method, f"{node.name}.")
                 for method in node.body if isinstance(method, FUNCTION_TYPES)
@@ -131,41 +149,79 @@ def python_lines(directory, name):
         elif isinstance(node, FUNCTION_TYPES):
             symbols.append(function_label(node))
 
-    # Keep tagged definitions visible even in modules with many helpers.
-    symbols.sort(key=lambda symbol: not symbol[0])
+    # Keep routes, tools, and conventional entry points visible ahead of helpers.
+    symbols.sort(key=lambda symbol: symbol[0])
     for _, label in symbols[:MAX_SYMBOLS]:
         yield label
     if len(symbols) > MAX_SYMBOLS:
         yield f"... {len(symbols) - MAX_SYMBOLS} more definitions"
 
 
-def tree_lines(directory, depth, indent=""):
+def entry_order(entry):
+    kind, name = entry
+    folded = name.casefold()
+    if kind == INCOMPLETE:
+        priority = 0
+    elif kind == FILE and folded.split(".", 1)[0] == "readme":
+        priority = 1
+    elif kind == FILE and folded in START_FILES:
+        priority = 2
+    elif kind == DIRECTORY:
+        priority = 3 if folded in SOURCE_DIRS else 4
+    else:
+        priority = 5
+    return priority, folded, name
+
+
+def file_lines(directory, name, indent):
+    yield f"{indent}|- {name}"
+    if name.lower().endswith(".py"):
+        for line in python_lines(directory, name):
+            yield f"{indent}   {line}"
+
+
+def tree_lines(directory, depth, prefix=""):
+    indent = "   " if prefix else ""
     try:
         # Only keep as many sorted entries as the output can show.
-        children = heapq.nsmallest(
-            MAX_LINES, entries(directory), key=lambda child: (child[0], child[1].casefold(), child[1]),
-        )
+        children = heapq.nsmallest(MAX_LINES, entries(directory), key=entry_order)
     except OSError:
         yield f"{indent}[directory unreadable]"
         return
+
+    folders = [name for kind, name in children if kind == DIRECTORY]
+    if prefix and children:
+        yield prefix
+
+    ordinary_files = []
     for kind, name in children:
         if kind == INCOMPLETE:
             yield f"{indent}[scan incomplete: some entries unavailable]"
         elif kind == DIRECTORY:
             yield f"{indent}|- {name}/"
-            if depth > 1:
-                with_child_indent = indent + "   "
-                try:
-                    with open_directory(name, directory) as child_directory:
-                        if not has_venv_marker(child_directory):
-                            yield from tree_lines(child_directory, depth - 1, with_child_indent)
-                except OSError:
-                    yield f"{with_child_indent}[directory unavailable]"
+        elif entry_order((kind, name))[0] < 3:
+            yield from file_lines(directory, name, indent)
         else:
-            yield f"{indent}|- {name}"
-            if name.lower().endswith(".py"):
-                for line in python_lines(directory, name):
-                    yield f"{indent}   {line}"
+            ordinary_files.append(name)
+
+    ordinary_lines = (
+        line for name in ordinary_files for line in file_lines(directory, name, indent)
+    )
+    if depth > 1 and folders:
+        preview = list(itertools.islice(ordinary_lines, MAX_ORDINARY_LINES + 1))
+        yield from preview[:MAX_ORDINARY_LINES]
+        if len(preview) > MAX_ORDINARY_LINES:
+            yield f"{indent}... more files or definitions. Use --depth 1 for this folder."
+        for name in folders:
+            child_prefix = f"{prefix}{name}/"
+            try:
+                with open_directory(name, directory) as child_directory:
+                    if not has_venv_marker(child_directory):
+                        yield from tree_lines(child_directory, depth - 1, child_prefix)
+            except OSError:
+                yield f"{child_prefix} [directory unavailable]"
+    else:
+        yield from ordinary_lines
 
 
 def compact_line(line):

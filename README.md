@@ -62,15 +62,16 @@ declares the lookup tool. The scan continues past the deliberate syntax error.
 
 ```text
 Repo map: demo_repo (depth 2)
+|- README.md
 |- api.py
    async def list_items() L12  [GET /items]
    def add_item() L17  [POST /items]
    class Inventory L6
    def Inventory.items() L7
+|- inventory/
 |- broken.py
    SyntaxError L1
-|- README.md
-|- inventory/
+inventory/
    |- tools.py
       def lookup_item() L5  [tool]
 ```
@@ -79,10 +80,16 @@ Repo map: demo_repo (depth 2)
 
 Use `--depth 1` for just the top level. The default is 3 and the accepted range is
 1–8. Output is capped at 80 lines of up to 100 characters, with up to six
-definitions per Python file. The scanner skips hidden entries (including
+definitions per Python file. Common starting files and folders appear before
+ordinary files. The map previews ordinary files in wide folders before showing
+their subfolders as separate sections. Scan a subfolder directly or use
+`--depth 1` to see more of its immediate files.
+
+The scanner skips hidden entries (including
 `.git` and `.env`), common cache and virtual environment directories, Python
 virtual environments marked by `pyvenv.cfg`, common secret file names and
-extensions, symbolic links, and Windows reparse points such as junctions. The
+extensions, common database files and their SQLite sidecars, symbolic links,
+and Windows reparse points such as junctions. The
 secret filter uses filenames. The CLI notes when directory entries become
 unavailable during a scan. Python files over 256 KiB appear in the tree with an
 AST skip message.

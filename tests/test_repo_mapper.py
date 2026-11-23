@@ -128,6 +128,25 @@ def unrelated(): pass
         self.write("item_79.txt")
         self.assertIn("output limit reached", self.map().splitlines()[-1])
 
+    def test_wide_repo_keeps_folders_entry_points_and_routes_visible(self):
+        for index in range(90):
+            self.write(f"00_state_{index:02}.json")
+        for name in ("application.db", "cache.sqlite", "store.sqlite3-wal", "work.db-journal",
+                     "state.sqlite3-shm"):
+            self.write(name)
+        helpers = "\n".join(f"def helper_{index}(): pass" for index in range(10))
+        self.write("main.py", helpers + "\ndef main(): pass\n")
+        self.write("api/server.py", '@app.get("/status")\ndef status(): pass\n')
+        self.write("core/engine.py", "class Engine: pass\n")
+        self.write("tests/test_engine.py")
+        output = self.map("--depth", "3")
+        for expected in ("|- api/", "|- core/", "|- tests/", "def main() L11", "[GET /status]",
+                         "class Engine L1", "more files or definitions"):
+            self.assertIn(expected, output)
+        for suffix in (".db", ".sqlite", "-wal", "-journal", "-shm"):
+            self.assertNotIn(suffix, output)
+        self.assertLess(output.index("|- core/"), output.index("|- 00_state_00.json"))
+
     def test_read_rejects_a_file_replaced_by_a_link(self):
         outside = self.root.parent / "outside.py"
         outside.touch()
